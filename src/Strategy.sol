@@ -12,6 +12,7 @@ import {ITermVaultEvents} from "./interfaces/term/ITermVaultEvents.sol";
 import {ITermAuctionOfferLocker} from "./interfaces/term/ITermAuctionOfferLocker.sol";
 import {ITermDiscountRateAdapter} from "./interfaces/term/ITermDiscountRateAdapter.sol";
 import {ITermAuction} from "./interfaces/term/ITermAuction.sol";
+import {IUsds} from "./interfaces/IUsds.sol";
 import {RepoTokenList, RepoTokenListData} from "./RepoTokenList.sol";
 import {TermAuctionList, TermAuctionListData, PendingOffer} from "./TermAuctionList.sol";
 import {RepoTokenUtils} from "./RepoTokenUtils.sol";
@@ -88,6 +89,8 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
     error AuctionNotOpen();
     error ZeroPurchaseTokenAmount();
     error OfferNotFound();
+    error OfferPriceLow();
+
 
     bytes32 internal constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
 
@@ -426,7 +429,7 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
 
             
             
-            uint256 discountRate = strategyState.discountRateAdapter.getDiscountRate(repoToken);
+            uint256 discountRate = _getDiscountRate(repoToken);
             uint256 repoRedemptionHaircut = strategyState.discountRateAdapter.repoRedemptionHaircut(repoToken);
             repoTokenAmountInBaseAssetPrecision = RepoTokenUtils.getNormalizedRepoTokenAmount(
                 repoToken,
@@ -856,18 +859,20 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
      * @param termAuction The address of the term auction
      * @param repoToken The address of the repoToken
      * @param idHash The hash of the offer ID
-     * @param offerPriceHash The hash of the offer price
+     * @param offerPrice The price of the offer
+     * @param offerNonce Randomized nonce for offer
      * @param purchaseTokenAmount The amount of purchase tokens being offered
      * @return offerIds An array of offer IDs for the submitted offers
      *
      * @dev This function validates the underlying repoToken, checks concentration limits, ensures the auction is open,
-     * and rebalances liquidity to support the offer submission. It handles both new offers and edits to existing offers.    
+     * and rebalances liquidity to support the offer submission. It handles both new offers and edits to existing offers.
      */
     function submitAuctionOffer(
         ITermAuction termAuction,
         address repoToken,
         bytes32 idHash,
-        bytes32 offerPriceHash,
+        uint256 offerPrice,
+        uint256 offerNonce,
         uint256 purchaseTokenAmount
     )
         external
@@ -878,6 +883,10 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
     {
         if(purchaseTokenAmount == 0) {
             revert ZeroPurchaseTokenAmount();
+        }
+
+        if (offerPrice < _adjustedUsdsRate()) {
+            revert OfferPriceLow();
         }
 
         ITermAuctionOfferLocker offerLocker = _validateAndGetOfferLocker(
@@ -897,7 +906,7 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
         ITermAuctionOfferLocker.TermAuctionOfferSubmission memory offer;
         offer.id = idHash;
         offer.offeror = address(this);
-        offer.offerPriceHash = offerPriceHash;
+        offer.offerPriceHash = keccak256(abi.encode(offerPrice, offerNonce));
         offer.amount = purchaseTokenAmount;
         offer.purchaseToken = address(asset);
 
@@ -922,7 +931,7 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
             revert BalanceBelowRequiredReserveRatio();
         }
 
-        // Calculate the resulting weighted time to maturity            
+        // Calculate the resulting weighted time to maturity
         // Passing in 0 adjustment because offer and balance already updated
         uint256 resultingWeightedTimeToMaturity = _calculateWeightedMaturity(
             address(0),
@@ -938,6 +947,7 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
         // Passing in 0 amount and 0 liquid balance adjustment because offer and balance already updated
         _validateRepoTokenConcentration(repoToken, 0, totalAssetValue, 0);
     }
+
 
     /**
      * @dev Submits an offer to a term auction and locks it using the offer locker.
@@ -1103,8 +1113,6 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
         uint256 totalAssetValue = _totalAssetValue(liquidBalance);
         require(totalAssetValue > 0);
 
-        uint256 discountRate = strategyState.discountRateAdapter.getDiscountRate(repoToken);
-
         // Calculate the repoToken amount in base asset precision        
         uint256 repoTokenAmountInBaseAssetPrecision = RepoTokenUtils.getNormalizedRepoTokenAmount(
             repoToken,
@@ -1118,7 +1126,7 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
             repoTokenAmountInBaseAssetPrecision,
             PURCHASE_TOKEN_PRECISION,
             redemptionTimestamp,
-            discountRate + strategyState.discountRateMarkup
+            _getDiscountRate(repoToken) + strategyState.discountRateMarkup
         );
 
         // Ensure the liquid balance is sufficient to cover the proceeds
@@ -1195,6 +1203,35 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
         });
 
         _grantRole(GOVERNOR_ROLE, _params._governorAddress);
+    }
+
+    function _getDiscountRate(address repoToken) internal view returns (uint256) {
+        uint256 usdsRate = _adjustedUsdsRate();
+        uint256 discountRateAuction = strategyState.discountRateAdapter.getDiscountRate(repoToken);
+        return usdsRate > discountRateAuction ? usdsRate : discountRateAuction;
+    }
+
+   function _adjustedUsdsRate() internal view returns (uint256) {
+        uint256 ssrRate = IUsds(0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD).ssr();
+
+        // x = ssr/RAY - 1 in RAY precision (27 decimals)
+        int256 x = int256(ssrRate - 1e27);
+        
+        // n = seconds in a 365.25 day year (no decimals)
+        int256 n = 31557600; 
+        
+        // First term: nx (result in 27 decimals)
+        int256 term1 = n * x;
+        
+        // Second term: n(n-1)x^2/2 
+        int256 term2 = (n * (n-1) * (x * x / 1e27)) / 2;
+        
+        // Third term: n(n-1)(n-2)x^3/6
+        // Do all multiplications first
+        int256 term3 = (n * (n-1) * (n-2) * (x * x / 1e27 * x / 1e27)) / 6;
+        
+        // Convert from 27 to 18 decimals and then adjust to 360 day Term Finance APY
+        return uint256(term1 + term2 + term3) * 36000 / (1e9 * 36525);
     }
 
     /*//////////////////////////////////////////////////////////////
