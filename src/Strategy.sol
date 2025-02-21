@@ -1218,6 +1218,7 @@ contract Strategy is BaseStrategy, Pausable, AccessControl {
         return (_rpow(ssrRate, 31557600) - 1e27) * 36000/ (1e9*36525); // ssr raised to 365.25 days in seconds, scaled to 9 decimals and adjusted to 360 day Term APY
     }
 
+    // Copied from https://github.com/makerdao/sdai/blob/e6f8cfa1d638b1ef1c6187a1d18f73b21d2754a2/src/SavingsDai.sol#L118
     function _rpow(uint256 x, uint256 n) internal pure returns (uint256 z) {
         assembly {
             let RAY := exp(10,27)
