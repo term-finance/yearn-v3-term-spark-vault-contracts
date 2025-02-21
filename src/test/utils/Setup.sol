@@ -118,7 +118,7 @@ contract Setup is ExtendedTest, IEvents {
         vm.mockCall(
             address(0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD),
             abi.encodeWithSelector(0x03607ceb),
-            abi.encode(1000000002659864411854984565)
+            abi.encode(1000000000000000000000000001)
         );
     }
 
