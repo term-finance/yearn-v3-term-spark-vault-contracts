@@ -113,6 +113,9 @@ contract TermDiscountRateAdapter is ITermDiscountRateAdapter, AccessControl {
         if (numOfAuctions > 0) {
             return currTermController;
         } else {
+            if (address(prevTermController) == address(0)) {
+                revert("Term controller not found");
+            }
             (, numOfAuctions) = prevTermController.getTermAuctionResults(ITermRepoToken(termRepoToken).termRepoId());
             if (numOfAuctions > 0) {
                 return prevTermController;
