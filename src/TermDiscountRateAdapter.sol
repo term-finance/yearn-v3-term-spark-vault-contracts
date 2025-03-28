@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ITermDiscountRateAdapter} from "./interfaces/term/ITermDiscountRateAdapter.sol";
-import {ITermController, AuctionMetadata} from "./interfaces/term/ITermController.sol";
-import {ITermRepoToken} from "./interfaces/term/ITermRepoToken.sol";
+import {ITermDiscountRateAdapter} from "./interface/ITermDiscountRateAdapter.sol";
+import {ITermController, AuctionMetadata} from "./interface/ITermController.sol";
+import {ITermRepoToken} from "./interface/ITermRepoToken.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 contract TermDiscountRateAdapter is ITermDiscountRateAdapter, AccessControl {
@@ -32,6 +32,10 @@ contract TermDiscountRateAdapter is ITermDiscountRateAdapter, AccessControl {
     function getDiscountRate(address termController, address repoToken) public view virtual returns (uint256) {
         
         if (repoToken == address(0)) return 0;
+
+        if (termController == address(0)) {
+            return getDiscountRate(repoToken);
+        }
 
         ITermController tokenTermController;
         if (termController == address(prevTermController)) {
@@ -104,13 +108,21 @@ contract TermDiscountRateAdapter is ITermDiscountRateAdapter, AccessControl {
     }
 
     function _identifyTermController(address termRepoToken) internal view returns (ITermController) {
-       if (currTermController.isTermDeployed(termRepoToken)) {
-           return currTermController;
-       } else if (prevTermController.isTermDeployed(termRepoToken)) {
-           return prevTermController;
-       } else {
-           revert("Term controller not found");
-       }
+        uint8 numOfAuctions;
+        (,numOfAuctions ) = currTermController.getTermAuctionResults(ITermRepoToken(termRepoToken).termRepoId());
+        if (numOfAuctions > 0) {
+            return currTermController;
+        } else {
+            if (address(prevTermController) == address(0)) {
+                revert("Term controller not found");
+            }
+            (, numOfAuctions) = prevTermController.getTermAuctionResults(ITermRepoToken(termRepoToken).termRepoId());
+            if (numOfAuctions > 0) {
+                return prevTermController;
+            } else {
+                revert("Term controller not found");
+            }
+        }
     }
 
     function _getDiscountRate(ITermController termController, address repoToken) internal view returns (uint256) {
